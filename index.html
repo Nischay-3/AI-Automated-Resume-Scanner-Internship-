@@ -195,6 +195,7 @@ h1 em{font-style:italic;color:var(--accent);}
 .toast{position:fixed;bottom:24px;right:24px;background:var(--red);color:#fff;border-radius:10px;padding:12px 20px;font-size:13px;font-weight:500;box-shadow:0 6px 24px rgba(0,0,0,.2);z-index:999;animation:fup .3s ease both;max-width:340px;}
 .hidden{display:none!important;}
 #fileInput{display:none;}
+
 </style>
 </head>
 <body>
@@ -600,37 +601,32 @@ Respond ONLY with a valid JSON object. No markdown fences, no explanation, no ex
 }
 
 // ════════════════════════════════════════════════════════
-// SCORE ONE FILE via Claude API  ← THE KEY FIX IS HERE
+// SCORE ONE FILE via Gemini Free API
 // ════════════════════════════════════════════════════════
 async function scoreFile(file, roleTitle, jobDesc, requiredSkills) {
   const type = getType(file.name);
-  let messageContent = [];
+  let parts = [];
 
   try {
     if (type === 'img') {
-      // Images: send as base64 vision input (unchanged — was already correct)
+      // Images: inline_data with base64
       const b64 = await fileToBase64(file);
       const mime = file.type || 'image/jpeg';
-      messageContent = [
-        { type: 'image', source: { type: 'base64', media_type: mime, data: b64 } },
-        { type: 'text', text: buildPrompt(file.name, '', roleTitle, jobDesc, requiredSkills) }
+      parts = [
+        { inline_data: { mime_type: mime, data: b64 } },
+        { text: buildPrompt(file.name, '', roleTitle, jobDesc, requiredSkills) }
       ];
 
     } else if (type === 'pdf') {
-      // FIX: PDFs must be sent as base64 documents, NOT readAsText()
-      // readAsText() on a PDF returns binary garbage on every run after the first
+      // PDFs: inline_data as application/pdf — Gemini reads natively
       const b64 = await fileToBase64(file);
-      messageContent = [
-        {
-          type: 'document',
-          source: { type: 'base64', media_type: 'application/pdf', data: b64 }
-        },
-        { type: 'text', text: buildPrompt(file.name, '', roleTitle, jobDesc, requiredSkills) }
+      parts = [
+        { inline_data: { mime_type: 'application/pdf', data: b64 } },
+        { text: buildPrompt(file.name, '', roleTitle, jobDesc, requiredSkills) }
       ];
 
     } else if (type === 'docx') {
-      // FIX: DOCX files are ZIP archives — readAsText() returns garbage.
-      // Use mammoth.js to properly extract plain text from DOCX.
+      // DOCX: extract text with mammoth.js first
       let resumeText = '';
       try {
         const arrayBuffer = await file.arrayBuffer();
@@ -640,24 +636,17 @@ async function scoreFile(file, roleTitle, jobDesc, requiredSkills) {
         console.warn('mammoth extraction failed:', e);
         resumeText = '';
       }
-      messageContent = [
-        { type: 'text', text: buildPrompt(file.name, resumeText, roleTitle, jobDesc, requiredSkills) }
-      ];
+      parts = [{ text: buildPrompt(file.name, resumeText, roleTitle, jobDesc, requiredSkills) }];
 
     } else {
-      // Unknown/plain text fallback
       const text = await fileToText(file);
-      messageContent = [{ type: 'text', text: buildPrompt(file.name, text, roleTitle, jobDesc, requiredSkills) }];
+      parts = [{ text: buildPrompt(file.name, text, roleTitle, jobDesc, requiredSkills) }];
     }
 
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    const resp = await fetch('/api/scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1200,
-        messages: [{ role: 'user', content: messageContent }]
-      })
+      body: JSON.stringify({ parts })
     });
 
     if (!resp.ok) {
@@ -666,7 +655,7 @@ async function scoreFile(file, roleTitle, jobDesc, requiredSkills) {
     }
 
     const data = await resp.json();
-    const raw = (data.content || []).map(c => c.text || '').join('');
+    const raw = data.text || '';
 
     // Strip markdown code fences if present
     const clean = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
